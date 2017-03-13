@@ -5,7 +5,7 @@ require 'optparse'
 require 'simp/cli/version'
 require 'simp/cli/lib/utils'
 require 'simp/cli/lib/libkv'
-
+require 'simp/cli/lib/passgen'
 # load each command
 commands_path = File.expand_path( 'cli/commands/*.rb', File.dirname(__FILE__) )
 

@@ -1,4 +1,5 @@
 require File.expand_path( '../../cli', File.dirname(__FILE__) )
+# vim: set expandtab ts=2 sw=2:
 
 module Simp::Cli::Commands; end
 class Simp::Cli::Commands::Passgen < Simp::Cli
@@ -12,6 +13,8 @@ class Simp::Cli::Commands::Passgen < Simp::Cli
   @names = Array.new
   @backup_passwords = nil
   @force_remove = false
+  @use_libkv = false
+  @libkv_url = nil
 
   @opt_parser = OptionParser.new do |opts|
     opts.banner = "\n=== The SIMP Passgen Tool ===."
@@ -46,6 +49,14 @@ class Simp::Cli::Commands::Passgen < Simp::Cli
 
     opts.on('-l', '--list-name', 'List possible password names for the specified environment.') do
       @operation = :show_name_list
+    end
+
+    opts.on("-x", "--url LIBKVURL", "URL for libkv") do |url|
+      @libkv_url = url
+    end
+
+    opts.on("-k", "--libkv", "Use libkv") do
+      @use_libkv = true
     end
 
     opts.on('-n', '--name NAME1[,NAME2,...]', Array,
@@ -87,6 +98,7 @@ class Simp::Cli::Commands::Passgen < Simp::Cli
       puts opts
       @help_requested = true
     end
+
   end
 
   def self.run(args = Array.new)
@@ -95,6 +107,7 @@ class Simp::Cli::Commands::Passgen < Simp::Cli
     return if @help_requested
 
     @environment = (@environment.nil? ? DEFAULT_ENVIRONMENT : @environment)
+    @libkv = Simp::Libkv.new(@libkv_url)
     @password_dir = get_password_dir if @password_dir.nil?
 
     case @operation
@@ -115,15 +128,22 @@ class Simp::Cli::Commands::Passgen < Simp::Cli
 
   def self.get_names
     names = []
-    begin
-      Dir.chdir(@password_dir) do
-          #File.ftype("#{@password_dir}/#{name}").eql?('file')
-        names = Dir.glob('*').select do |x|
-          File.file?(x) && (x !~ /\..+$/)  # exclude salt and backup files
-        end
+    if (@use_libkv == true)
+      names = @libkv.list({ "key" => "/passgen"}).keys.select do |name|
+        name !~ /\..+$/
       end
-    rescue SystemCallError => err
-      raise "Error occurred while accessing '#{@password_dir}': #{err}"
+    else
+      validate_password_dir
+      begin
+        Dir.chdir(@password_dir) do
+          #File.ftype("#{@password_dir}/#{name}").eql?('file')
+          names = Dir.glob('*').select do |x|
+            File.file?(x) && (x !~ /\..+$/)  # exclude salt and backup files
+          end
+        end
+      rescue SystemCallError => err
+        raise "Error occurred while accessing '#{@password_dir}': #{err}"
+      end
     end
     names.sort
   end
@@ -149,13 +169,17 @@ class Simp::Cli::Commands::Passgen < Simp::Cli
   end
 
   def self.show_environment_list
-    # FIXME This ASSUMES @password_dir follows a known pattern of
-    #   <env dir>/<env>/simp_autofiles/gen_passwd
-    # (which also assumes Linux path separators)
-    unless @password_dir.include?("/simp_autofiles/gen_passwd")
-      raise "Password environment directory could not be determined from '#{@password_dir}'"
+    if (@use_libkv == true)
+      env_dir = ::Utils.puppet_info[:environment_path]
+    else
+      # FIXME This ASSUMES @password_dir follows a known pattern of
+      #   <env dir>/<env>/simp_autofiles/gen_passwd
+      # (which also assumes Linux path separators)
+      unless @password_dir.include?("/simp_autofiles/gen_passwd")
+        raise "Password environment directory could not be determined from '#{@password_dir}'"
+      end
+      env_dir = File.dirname(@password_dir.split("/simp_autofiles/")[0])
     end
-    env_dir = File.dirname(@password_dir.split("/simp_autofiles/")[0])
     raise "Password environment directory '#{env_dir}' does not exist" unless File.exist?(env_dir)
     raise "Password environment directory '#{env_dir}' is not a directory" unless File.directory?(env_dir)
     environments = []
@@ -171,85 +195,129 @@ class Simp::Cli::Commands::Passgen < Simp::Cli
   end
 
   def self.show_name_list
-    validate_password_dir
     names = get_names
     puts "#{@environment} Names:\n\t#{names.join("\n\t")}"
     puts
   end
 
   def self.show_passwords
-    validate_password_dir
     validate_names
 
     title =  "#{@environment} Environment"
     puts title
     puts '='*title.length
     @names.each do |name|
-      Dir.chdir(@password_dir) do
-        puts "Name: #{name}"
-        current_password = File.open("#{@password_dir}/#{name}", 'r').gets
-        puts "  Current:  #{current_password}"
-        last_password = nil
-        last_password_file = "#{@password_dir}/#{name}.last"
-        if File.exists?(last_password_file)
-          last_password = File.open(last_password_file, 'r').gets
+      last = nil
+      current = nil
+      if (@use_libkv == true)
+        current = @libkv.get({ "key" => "/passgen/#{name}"})
+        last = @libkv.get({ "key" => "/passgen/#{name}.last"})
+      else
+        Dir.chdir(@password_dir) do
+          current = File.open("#{@password_dir}/#{name}", 'r').gets
+          last_password = nil
+          last_password_file = "#{@password_dir}/#{name}.last"
+          if File.exists?(last_password_file)
+            last = File.open(last_password_file, 'r').gets
+          end
         end
-        puts "  Previous: #{last_password}" if last_password
+      end
+      puts "Name: #{name}"
+      puts "  Current:  #{current}"
+      if (last != nil)
+        puts "  Previous: #{last}" if last
       end
       puts
     end
   end
 
   def self.set_passwords
-    validate_password_dir
     @names.each do |name|
-      password_filename = "#{@password_dir}/#{name}"
-
+      if (@use_libkv == true)
+      else
+        validate_password_dir
+        password_filename = "#{@password_dir}/#{name}"
+      end
       puts "#{@environment} Name: #{name}"
 #TODO add an auto-generate option and use Simp::Cli::Config::Utils.generate_password
       password = Utils.get_password
-      if File.exists?(password_filename)
+# XXX TODO: use atomic operation here as this is racy.
+      password_exists = false
+      if (@use_libkv == true)
+        password_exists = @libkv.exists({"key" => "/passgen/#{name}"})
+      else
+        password_exists = File.exists?(password_filename)
+      end
+
+      if password_exists
         backup_passwords = @backup_passwords
         if backup_passwords.nil?
           backup_passwords = Utils.yes_or_no("Would you like to rotate the old password?", false)
         end
         if backup_passwords
-          begin
-            FileUtils.mv(password_filename, password_filename + '.last', :verbose => true, :force => true)
-          rescue SystemCallError => err
-            raise "Error occurred while moving '#{password_filename}' to '#{password_filename + '.last'}': #{err}"
+          if (@use_libkv == true)
+            previous_backup = @libkv.atomic_get({"key" => "/passgen/#{name}.last"})
+            new_backup = @libkv.get({"key" => "/passgen/#{name}"})
+            @libkv.put({ "key" => "/passgen/#{name}.last", "value" => new_backup, "previous" => previous_backup})
+          else
+            begin
+              FileUtils.mv(password_filename, password_filename + '.last', :verbose => true, :force => true)
+            rescue SystemCallError => err
+              raise "Error occurred while moving '#{password_filename}' to '#{password_filename + '.last'}': #{err}"
+            end
           end
         end
       end
-      begin
-        File.open(password_filename, 'w') { |file| file.puts password }
-      rescue SystemCallError => e
-        raise "Error occurred while writing '#{password_filename}': #{err}"
+      if (@use_libkv == true)
+        previous = @libkv.atomic_get({"key" => "/passgen/#{name}"})
+        @libkv.put({ "key" => "/passgen/#{name}", "value" => password, "previous" => previous})
+      else
+        begin
+          File.open(password_filename, 'w') { |file| file.puts password }
+        rescue SystemCallError => e
+          raise "Error occurred while writing '#{password_filename}': #{err}"
+        end
       end
       puts
     end
   end
 
   def self.remove_passwords
-    validate_password_dir
+    unless (@use_libkv == true)
+      validate_password_dir
+    end
     validate_names
 
     @names.each do |name|
-      password_filename = "#{@password_dir}/#{name}"
-      if File.exists?(password_filename)
+      password_exists = false
+      if (@use_libkv == true)
+        password_exists = @libkv.exists({ "key" => "/passgen/#{name}"})
+      else
+        password_filename = "#{@password_dir}/#{name}"
+        password_exists = File.exists?(password_filename)
+      end
+      if (password_exists)
         remove = @force_remove
         unless remove
           remove = Utils.yes_or_no("Are you sure you want to remove all entries for #{name}?", false)
         end
         if remove
-          last_password_filename = password_filename + '.last'
-          if File.exists?(last_password_filename)
-            File.delete(last_password_filename)
-            puts "#{last_password_filename} deleted"
+          if (@use_libkv == true)
+            if (@libkv.delete({"key" => "/passgen/#{name}.last"}))
+              puts "#{name}.last deleted"
+            end
+            if (@libkv.delete({"key" => "/passgen/#{name}"}))
+              puts "#{name} deleted"
+            end
+          else
+            last_password_filename = password_filename + '.last'
+            if File.exists?(last_password_filename)
+              File.delete(last_password_filename)
+             puts "#{last_password_filename} deleted"
+            end
+            File.delete(password_filename)
+            puts "#{password_filename} deleted"
           end
-
-          File.delete(password_filename)
-          puts "#{password_filename} deleted"
         end
       end
       puts
