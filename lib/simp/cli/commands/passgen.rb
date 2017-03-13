@@ -1,9 +1,11 @@
 require File.expand_path( '../../cli', File.dirname(__FILE__) )
+# vim: set expandtab ts=2 sw=2:
 
 module Simp::Cli::Commands; end
 class Simp::Cli::Commands::Passgen < Simp::Cli
   require 'fileutils'
-
+  @use_libkv = false
+  @libkv_url = nil
   @show_list = false
   @show_users = Array.new
   @set_users = Array.new
@@ -25,6 +27,14 @@ class Simp::Cli::Commands::Passgen < Simp::Cli
       @show_list = true
     end
 
+    opts.on("-x", "--url LIBKVURL", "URL for libkv") do |url|
+      @libkv_url = url
+    end
+
+    opts.on("-k", "--libkv", "Use libkv") do
+      @use_libkv = true
+    end
+
     opts.on("-u", "--user USER1[,USER2,USER3]", Array, "Show password(s) for USERNAME") do |name|
       @show_users = name
     end
@@ -42,112 +52,116 @@ class Simp::Cli::Commands::Passgen < Simp::Cli
       @help_requested = true
     end
 
-   end
+  end
 
   def self.run(args = Array.new)
     raise "The SIMP Passgen Tool requires at least one argument to work" if args.empty?
     super
     return if @help_requested
-
-    unless @target_dir
-      env_path = ::Utils.puppet_info[:environment_path]
-      if File.directory?(env_path)
-        @target_dir = File.join(env_path, 'simp/simp_autofiles/gen_passwd')
-      else
-        raise(OptionParser::ParseError, 'Could not find a target passgen directory, please specify one with the `-d` option')
-      end
-    end
-
-    raise "Target directory '#{@target_dir}' does not exist" unless File.directory?(@target_dir)
-
-    begin
-      Dir.chdir(@target_dir) do
-          #File.ftype("#{@target_dir}/#{name}").eql?("file")
-        @user_names = Dir.glob("*").select do |x|
-          File.file?(x) && (x !~ /\..+$/)
+    if (@use_libkv == true)
+      passgen = Simp::Passgen.new()
+      passgen.passgen("test")
+    else
+      unless @target_dir
+        env_path = ::Utils.puppet_info[:environment_path]
+        if File.directory?(env_path)
+          @target_dir = File.join(env_path, 'simp/simp_autofiles/gen_passwd')
+        else
+          raise(OptionParser::ParseError, 'Could not find a target passgen directory, please specify one with the `-d` option')
         end
       end
-    rescue => err
-      raise "Error occurred while accessing '#{@target_dir}':\n  Causing Error: #{err}"
-    end
 
-    if @show_list
-      puts "Usernames:\n\t#{@user_names.join("\n\t")}"
-      puts
-    end
+      raise "Target directory '#{@target_dir}' does not exist" unless File.directory?(@target_dir)
 
-    @show_users.each do |user|
-      if @user_names.include?(user)
-        Dir.chdir(@target_dir) do
-          puts "Username: #{user}"
-          current_password = File.open("#{@target_dir}/#{user}", 'r').gets
-          puts "  Current:  #{current_password}"
-          last_password = nil
-          last_password_file = "#{@target_dir}/#{user}.last"
-          if File.exists?(last_password_file)
-            last_password = File.open(last_password_file, 'r').gets
-          end
-          puts "  Previous: #{last_password}" if last_password
-        end
-      else
-        raise "Invalid username '#{user}' selected.\n\n Valid: #{@user_names.join(', ')}"
-      end
-      puts
-    end
-
-    @set_users.each do |user|
-      password_filename = "#{@target_dir}/#{user}"
-
-      puts "Username: #{user}"
-      password = Utils.get_password
-      if File.exists?(password_filename)
-        if Utils.yes_or_no("Would you like to rotate the old password?", false)
-          begin
-            FileUtils.mv(password_filename, password_filename + '.last')
-          rescue => err
-            raise "Error occurred while moving '#{password_filename}' to '#{password_filename + '.last'}'\n  Causing Error: #{err}"
-          end
-        end
-      end
       begin
-        File.open(password_filename, 'w') { |file| file.puts password }
-      rescue => err
-        raise "Error occurred while writing '#{password_filename}'\n  Causing Error: #{err}"
-      end
-      puts
-    end
-
-    @remove_users.each do |user|
-      password_filename = "#{@target_dir}/#{user}"
-
-      if File.exists?(password_filename)
-        if Utils.yes_or_no("Are you sure you want to remove all entries for #{user}?", false)
-          show_password(user)
-
-          last_password_filename = password_filename + '.last'
-          if File.exists?(last_password_filename)
-            File.delete(last_password_filename)
-            puts "#{last_password_filename} deleted"
+        Dir.chdir(@target_dir) do
+          #File.ftype("#{@target_dir}/#{name}").eql?("file")
+          @user_names = Dir.glob("*").select do |x|
+            File.file?(x) && (x !~ /\..+$/)
           end
-
-          File.delete(password_filename)
-          puts "#{password_filename} deleted"
         end
+      rescue => err
+        raise "Error occurred while accessing '#{@target_dir}':\n  Causing Error: #{err}"
       end
-      puts
-    end
-  end
 
-  # Resets options to original values.
-  # This ugly method is needed for unit-testing, in which multiple occurrences of
-  # the self.run method are called with different options.
-  # FIXME Variables set here are really class variables, not instance variables.
-  def self.reset_options
-    @show_list = false
-    @show_users = Array.new
-    @set_users = Array.new
-    @remove_users = Array.new
-    @target_dir = nil
-    @help_requested = false
+      if @show_list
+        puts "Usernames:\n\t#{@user_names.join("\n\t")}"
+        puts
+      end
+
+      @show_users.each do |user|
+        if @user_names.include?(user)
+          Dir.chdir(@target_dir) do
+            puts "Username: #{user}"
+            current_password = File.open("#{@target_dir}/#{user}", 'r').gets
+            puts "  Current:  #{current_password}"
+            last_password = nil
+            last_password_file = "#{@target_dir}/#{user}.last"
+            if File.exists?(last_password_file)
+              last_password = File.open(last_password_file, 'r').gets
+            end
+            puts "  Previous: #{last_password}" if last_password
+          end
+        else
+          raise "Invalid username '#{user}' selected.\n\n Valid: #{@user_names.join(', ')}"
+        end
+        puts
+      end
+
+      @set_users.each do |user|
+        password_filename = "#{@target_dir}/#{user}"
+
+        puts "Username: #{user}"
+        password = Utils.get_password
+        if File.exists?(password_filename)
+          if Utils.yes_or_no("Would you like to rotate the old password?", false)
+            begin
+              FileUtils.mv(password_filename, password_filename + '.last')
+            rescue => err
+              raise "Error occurred while moving '#{password_filename}' to '#{password_filename + '.last'}'\n  Causing Error: #{err}"
+            end
+          end
+        end
+        begin
+          File.open(password_filename, 'w') { |file| file.puts password }
+        rescue => err
+          raise "Error occurred while writing '#{password_filename}'\n  Causing Error: #{err}"
+        end
+        puts
+      end
+
+      @remove_users.each do |user|
+        password_filename = "#{@target_dir}/#{user}"
+
+        if File.exists?(password_filename)
+          if Utils.yes_or_no("Are you sure you want to remove all entries for #{user}?", false)
+            show_password(user)
+
+            last_password_filename = password_filename + '.last'
+            if File.exists?(last_password_filename)
+              File.delete(last_password_filename)
+              puts "#{last_password_filename} deleted"
+            end
+
+            File.delete(password_filename)
+            puts "#{password_filename} deleted"
+          end
+        end
+        puts
+      end
+    end
+
+    # Resets options to original values.
+    # This ugly method is needed for unit-testing, in which multiple occurrences of
+    # the self.run method are called with different options.
+    # FIXME Variables set here are really class variables, not instance variables.
+    def self.reset_options
+      @show_list = false
+      @show_users = Array.new
+      @set_users = Array.new
+      @remove_users = Array.new
+      @target_dir = nil
+      @help_requested = false
+    end
   end
 end
